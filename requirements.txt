@@ -28,10 +28,13 @@ numba==0.64.0
 numpy==2.4.2
 packaging==26.0
 pandas==3.0.1
+pandarallel==1.6.5
 plotly==6.5.2
+pyarrow==16.0.0
 Pygments==2.19.2
 pynndescent==0.6.0
 pyspellchecker==0.8.4
+pandarallel==1.6.5
 python-dateutil==2.9.0.post0
 PyYAML==6.0.3
 regex==2026.1.15
