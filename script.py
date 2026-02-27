@@ -9,7 +9,7 @@ from datetime import datetime
 from spellchecker import SpellChecker
 from nltk.corpus import stopwords
 from nltk.stem.snowball import GermanStemmer
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from sentence_transformers import SentenceTransformer
 import gensim
 from gensim import corpora
@@ -20,6 +20,16 @@ from pandarallel import pandarallel
 nltk.download('punkt')
 nltk.download('punkt_tab')
 nltk.download('stopwords')
+
+
+# --- Globale Stopwords-Liste (auch für BERTopic) ---
+GERMAN_STOPWORDS = set(stopwords.words('german'))
+GERMAN_STOPWORDS.update(["ich", "mich", "mir", "mein", "meine", "wir", "uns", "man", "es",
+    "habe", "hat", "hatte", "hätte", "bin", "ist", "war", "wäre", "wurde", "wurden",
+    "geht", "ging", "gibt", "kam", "kommen", "machen", "macht", "getan",
+    "da", "dann", "also", "aber", "oder", "und", "für", "auf", "in", 
+    "beim", "dass", "das", "die", "der", "den", "dem", "des", "ein", "eine", 
+    "einen", "einem", "einer", "nicht", "nur", "auch", "so", "wie", "als"])
 
 
 # --- Hilfsfunktionen für Speichern/Laden ---
@@ -139,11 +149,10 @@ def preprocess_text(text):
     import nltk
     from spellchecker import SpellChecker
     from nltk.stem.snowball import GermanStemmer
-    from nltk.corpus import stopwords
     
     spell = SpellChecker(language='de')
     stemmer = GermanStemmer()
-    stop_words = set(stopwords.words('german'))
+    stop_words = GERMAN_STOPWORDS  # Nutze globale Stopwords-Liste
     
     # Noise Removal (Sonderzeichen, Emojis, Zahlen entfernen)
     text = re.sub(r'[^a-zA-ZäöüÄÖÜß\s]', '', text)
@@ -388,7 +397,11 @@ if __name__ == '__main__':
             embedding_model_name = 'paraphrase-multilingual-MiniLM-L12-v2'
             embedding_model = SentenceTransformer(embedding_model_name)
         
-        topic_model = BERTopic(embedding_model=embedding_model, language="german", verbose=True, nr_topics=12, min_topic_size=50)
+        # BERTopic mit Stopword-Filterung konfigurieren
+        vectorizer = CountVectorizer(stop_words=list(GERMAN_STOPWORDS), max_features=1000, 
+                                     lowercase=True, ngram_range=(1, 2))
+        topic_model = BERTopic(embedding_model=embedding_model, language="german", verbose=True, 
+                               nr_topics=12, min_topic_size=50, vectorizer_model=vectorizer)
 
         # Training (Fit)
         topics, probs = topic_model.fit_transform(df['review_body'].tolist(), embeddings)
