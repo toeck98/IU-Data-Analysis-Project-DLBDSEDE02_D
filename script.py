@@ -22,7 +22,7 @@ nltk.download('punkt_tab')
 nltk.download('stopwords')
 
 
-# --- Globale Stopwords-Liste (auch für BERTopic) ---
+# --- Globale Stopwords-Liste erstellen ---
 GERMAN_STOPWORDS = set(stopwords.words('german'))
 GERMAN_STOPWORDS.update(["ich", "mich", "mir", "mein", "meine", "wir", "uns", "man", "es",
     "habe", "hat", "hatte", "hätte", "bin", "ist", "war", "wäre", "wurde", "wurden",
@@ -34,7 +34,6 @@ GERMAN_STOPWORDS.update(["ich", "mich", "mir", "mein", "meine", "wir", "uns", "m
 
 # --- Hilfsfunktionen für Speichern/Laden ---
 def get_filename(base_name, output_dir, add_timestamp=False, extension='pkl'):
-    """Erstellt Dateinamen mit optionalem Zeitstempel"""
     if add_timestamp:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f"{base_name}_{timestamp}.{extension}"
@@ -47,20 +46,14 @@ def save_step(step_num, data, output_dir, add_timestamp=False):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    if step_num == 1:
-        # DataFrame als Parquet speichern
-        filepath = get_filename('step1_data', output_dir, add_timestamp, 'parquet')
-        data['df'].to_parquet(filepath)
-        print(f"✓ Schritt 1 gespeichert: {filepath}")
-    
-    elif step_num == 2:
-        # DataFrame mit Vorverarbeitung als Parquet speichern
+    if step_num == 2:
+        # Vorverarbeitete Daten speichern 
         filepath = get_filename('step2_data', output_dir, add_timestamp, 'parquet')
         data['df'].to_parquet(filepath)
         print(f"✓ Schritt 2 gespeichert: {filepath}")
     
     elif step_num == 3:
-        # Alle Vektorisierungsdaten in einer joblib-Datei speichern
+        # Vektorisierte Daten speichern
         filepath = get_filename('step3_data', output_dir, add_timestamp, 'joblib')
         joblib.dump({
             'df': data['df'],
@@ -72,7 +65,7 @@ def save_step(step_num, data, output_dir, add_timestamp=False):
         print(f"✓ Schritt 3 gespeichert: {filepath}")
     
     elif step_num == 4:
-        # Alle Themenextraktionsdaten in einer joblib-Datei speichern
+        # Trainierte Themenmodelle speichern (LDA + BERTopic) mit allen Zwischenergebnissen
         filepath = get_filename('step4_data', output_dir, add_timestamp, 'joblib')
         
         joblib.dump({
@@ -152,7 +145,7 @@ def preprocess_text(text):
     
     spell = SpellChecker(language='de')
     stemmer = GermanStemmer()
-    stop_words = GERMAN_STOPWORDS  # Nutze globale Stopwords-Liste
+    stop_words = GERMAN_STOPWORDS
     
     # Noise Removal (Sonderzeichen, Emojis, Zahlen entfernen)
     text = re.sub(r'[^a-zA-ZäöüÄÖÜß\s]', '', text)
@@ -199,7 +192,7 @@ if __name__ == '__main__':
     # ==========================================
     
     parser = argparse.ArgumentParser(
-        description='Datenanalyse-Pipeline mit Zwischenspeicherung',
+        description='Datenanalyse-Skript mit Zwischenspeicherung',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
             Beispiele:
@@ -260,19 +253,17 @@ if __name__ == '__main__':
     # SCHRITT 1: DATEN LADEN
     # ==========================================
     
-    if start_step <= 1:
+    if start_step in [1,2]:
         print("\n" + "=" * 60)
         print("SCHRITT 1: DATEN LADEN")
         print("=" * 60)
         
-        # Parquet-Datei laden
+        # Rohdaten aus Parquet-Datei laden (Amazon Bewertungen auf Deutsch)
         df = pd.read_parquet('Dataset\\edit_amazon_reviews_multi_de_train.parquet')
-        print(f"✓ Daten geladen: {len(df)} Zeilen")
-        
-        # Zwischenspeichern in Datei
-        save_step(1, {'df': df}, output_dir, add_timestamp)
+        print(f"✓ Rohdaten geladen: {len(df)} Bewertungen gelesen")
+        print(f"  Spalten: {', '.join(df.columns[:5])}...")
     
-    elif start_step > 1:
+    if start_step > 2:
         # Lade vorherigen Schritt
         if start_step == 2:
             print("\nÜberspringe Schritt 1, lade Daten von Schritt 1...")
@@ -281,7 +272,9 @@ if __name__ == '__main__':
         loaded_data = load_step(start_step - 1, output_dir, add_timestamp)
         
         if loaded_data is None:
-            print(f"✗ Fehler: Kann Schritt {start_step-1} nicht laden. Starte bei Schritt 1.")
+            print(f"✗ WARNUNG: Datei von Schritt {start_step-1} nicht gefunden in '{output_dir}'")
+            print(f"  → Mögliche Ursachen: 1) Ordner existiert nicht, 2) andere --add-timestamp Einstellung")
+            print(f"  → Lösung: Starte neu bei Schritt 1...\n")
             start_step = 1
             df = pd.read_parquet('Dataset\\edit_amazon_reviews_multi_de_train.parquet')
             save_step(1, {'df': df}, output_dir, add_timestamp)
@@ -320,9 +313,9 @@ if __name__ == '__main__':
         # Worker-Prozesse initialisieren
         pandarallel.initialize(progress_bar=True, verbose=1)
 
-        # Wörterliste für LDA speichern
+        # 1. Tokenisiere & bereinige Texte → Wörterliste (für LDA)
         df['processed_tokens'] = df['review_body'].parallel_apply(preprocess_text)
-        # ganze Sätze für BERTopic/SBERT speichern
+        # 2. kombiniere Tokens → String (für TF-IDF)
         df['processed_text'] = df['processed_tokens'].parallel_apply(lambda x: " ".join(x))
         
         print(f"✓ Vorverarbeitung abgeschlossen")
@@ -428,7 +421,7 @@ if __name__ == '__main__':
         print("=" * 60)
 
         # LDA
-        print("\nGefundene Themen (LDA):")
+        print("\nGefundene Themen mit LDA:")
         print("-" * 60)
         lda_topics = []
         for idx, topic in lda_model.print_topics(-1):
@@ -436,12 +429,12 @@ if __name__ == '__main__':
             lda_topics.append((idx, topic))
 
         # BERTopic
-        print("\nGefundene Themen (BERTopic):")
+        print("\nGefundene Themen mit BERTopic:")
         print("-" * 60)
         freq = topic_model.get_topic_info()
         print(freq.head())
         
-        # Zwischenspeichern in Datei
+        # Speichern in Datei
         save_step(5, {
             'lda_topics': lda_topics,
             'bertopic_info': freq
