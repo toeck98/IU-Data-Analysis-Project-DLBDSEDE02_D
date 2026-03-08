@@ -10,6 +10,7 @@ from spellchecker import SpellChecker
 from nltk.corpus import stopwords
 from nltk.stem.snowball import GermanStemmer
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.decomposition import TruncatedSVD
 from sentence_transformers import SentenceTransformer
 import gensim
 from gensim import corpora
@@ -65,7 +66,7 @@ def save_step(step_num, data, output_dir, add_timestamp=False):
         print(f"✓ Schritt 3 gespeichert: {filepath}")
     
     elif step_num == 4:
-        # Trainierte Themenmodelle speichern (LDA + BERTopic) mit allen Zwischenergebnissen
+        # Trainierte Themenmodelle speichern
         filepath = get_filename('step4_data', output_dir, add_timestamp, 'joblib')
         
         joblib.dump({
@@ -75,6 +76,8 @@ def save_step(step_num, data, output_dir, add_timestamp=False):
             'topics': data['topics'],
             'probs': data['probs'],
             'lda_model': data['lda_model'],
+            'lsa_model': data['lsa_model'],
+            'tfidf_vectorizer': data['tfidf_vectorizer'],
             'topic_model': data['topic_model']
         }, filepath, compress=3)
         print(f"✓ Schritt 4 gespeichert: {filepath}")
@@ -91,7 +94,13 @@ def save_step(step_num, data, output_dir, add_timestamp=False):
             f.write("-" * 60 + "\n")
             for idx, topic in data['lda_topics']:
                 f.write(f"Topic {idx}:\n{topic}\n\n")
-            
+
+            f.write("\n" + "=" * 60 + "\n")
+            f.write("LSA Themen:\n")
+            f.write("-" * 60 + "\n")
+            for idx, topic in data['lsa_topics']:
+                f.write(f"Topic {idx}:\n{topic}\n\n")
+
             f.write("\n" + "=" * 60 + "\n")
             f.write("BERTopic Themen:\n")
             f.write("-" * 60 + "\n")
@@ -170,6 +179,15 @@ def preprocess_text(text):
     return clean_words
 
 
+def get_lsa_topics(lsa_model, feature_names, top_n=10):
+    lsa_topics = []
+    for idx, component in enumerate(lsa_model.components_):
+        top_term_indices = component.argsort()[-top_n:][::-1]
+        terms_with_weights = [f"{component[i]:.3f}*\"{feature_names[i]}\"" for i in top_term_indices]
+        lsa_topics.append((idx, " + ".join(terms_with_weights)))
+    return lsa_topics
+
+
 if __name__ == '__main__':
     # ==========================================
     # Variablen initialisieren
@@ -183,6 +201,7 @@ if __name__ == '__main__':
     dictionary = None
     corpus = None
     lda_model = None
+    lsa_model = None
     topic_model = None
     topics = None
     probs = None
@@ -274,7 +293,7 @@ if __name__ == '__main__':
         if loaded_data is None:
             print(f"✗ WARNUNG: Datei von Schritt {start_step-1} nicht gefunden in '{output_dir}'")
             print(f"  → Mögliche Ursachen: 1) Ordner existiert nicht, 2) andere --add-timestamp Einstellung")
-            print(f"  → Lösung: Starte neu bei Schritt 1...\n")
+            print(f"  → Starte neu bei Schritt 1...\n")
             start_step = 1
             df = pd.read_parquet('Dataset\\edit_amazon_reviews_multi_de_train.parquet')
             save_step(1, {'df': df}, output_dir, add_timestamp)
@@ -295,6 +314,7 @@ if __name__ == '__main__':
                 dictionary = loaded_data.get('dictionary')
                 corpus = loaded_data.get('corpus')
                 lda_model = loaded_data.get('lda_model')
+                lsa_model = loaded_data.get('lsa_model')
                 topic_model = loaded_data.get('topic_model')
                 topics = loaded_data.get('topics')
                 probs = loaded_data.get('probs')
@@ -332,22 +352,28 @@ if __name__ == '__main__':
         print("SCHRITT 3: VEKTORISIERUNG")
         print("=" * 60)
         
-        print("\nStarte Vektorisierung...")
+        print("\nStarte Vektorisierung (TF-IDF + Deep Learning Embeddings)...")
 
-        # TF-IDF
+        # === TF-IDF: Traditional Bag-of-Words Vektorisierung (für LDA) ===
+        # Parameter: Filtere zu häufige Wörter (>85% Docs) und zu seltene (<0.3% Docs)
         max_document_frequency = 0.85
         min_document_frequency = 0.003
-        print("Erstelle Document-Term-Matrix mit TF-IDF...")
+        
+        print(f"\n  1. TF-IDF Vektorisierung (max_df={max_document_frequency}, min_df={min_document_frequency})...")
         tfidf_vectorizer = TfidfVectorizer(max_df=max_document_frequency, min_df=min_document_frequency)
         tfidf_matrix = tfidf_vectorizer.fit_transform(df['processed_text'])
-        print(f"✓ TF-IDF Matrix erstellt: {tfidf_matrix.shape}")
+        n_features = tfidf_matrix.shape[1]
+        sparsity = 100 * (1 - tfidf_matrix.nnz / (tfidf_matrix.shape[0] * tfidf_matrix.shape[1]))
+        print(f"    ✓ TF-IDF Matrix: {tfidf_matrix.shape[0]} Dokumente × {n_features} Features")
+        print(f"    Sparsität: {sparsity:.1f}% (dünn besetzt = gut)")
 
-        # SBERT
-        print("Erstelle Embeddings mit SBERT...")
+        # === SBERT: Deep Learning Embeddings (für BERTopic) ===
+        # Nutze ORIGINAL-Texte (nicht processed) um semantischen Kontext zu bewahren
+        print(f"\n  2. SBERT Deep Learning Embeddings (multilingual-MiniLM-L12)...")
         embedding_model_name = 'paraphrase-multilingual-MiniLM-L12-v2'
         embedding_model = SentenceTransformer(embedding_model_name)
         embeddings = embedding_model.encode(df['review_body'].tolist(), show_progress_bar=True)
-        print(f"✓ Embeddings erstellt: {embeddings.shape}")
+        print(f"    ✓ Embeddings erstellt: {embeddings.shape[0]} Dokumente × {embeddings.shape[1]} Dimensionen")
         
         # Zwischenspeichern in Datei
         save_step(3, {
@@ -367,43 +393,67 @@ if __name__ == '__main__':
         print("SCHRITT 4: THEMENEXTRAKTION")
         print("=" * 60)
 
-        # --- Methode A: LDA ---
-        print("\n--- Start LDA ---")
-        # Wörterbuch erstellen
+        # === METHODE A: LDA (Latent Dirichlet Allocation) ===
+        print("\n  3. LDA Topic-Modellierung...")
+        
+        # Erstelle Gensim-Wörterbuch
         dictionary = corpora.Dictionary(df['processed_tokens'])
-        # Dokument-Term-Matrix erstellen
+        print(f"    Vokabular: {len(dictionary)} unique Tokens")
+        
+        # Konvertiere zu Bow-Format
         corpus = [dictionary.doc2bow(text) for text in df['processed_tokens']]
-
-        # LDA Modell trainieren
+        
+        # Trainiere LDA Modell
+        print(f"    Trainiere LDA...")
         lda_model = gensim.models.ldamodel.LdaModel(corpus=corpus,
                                                    id2word=dictionary,
                                                    num_topics=12,
                                                    random_state=42,
                                                    passes=10)
-        print(f"✓ LDA Modell trainiert")
+        print(f"    ✓ LDA Modell trainiert und konvergiert")
 
-        # --- Methode B: BERTopic ---
-        print("\n--- Start BERTopic ---")
+        # === METHODE B: LSA (Latent Semantic Analysis) ===
+        print("\n  4. LSA Topic-Modellierung...")
+        n_topics = 12
+        print(f"    Trainiere LSA...")
+        lsa_model = TruncatedSVD(n_components=n_topics, random_state=42)
+        lsa_model.fit(tfidf_matrix)
+        explained_variance = float(np.sum(lsa_model.explained_variance_ratio_))
+        print(f"    ✓ LSA Modell trainiert: {n_topics} Komponenten, erklärte Varianz={explained_variance:.2%}")
+
+        # === METHODE C: BERTopic (Modern Deep Learning) ===
+        print("\n  5. BERTopic Topic-Modellierung (moderner kontextbasierter Ansatz)...")
         
         # Embedding Model laden falls noch nicht geladen
         if embedding_model is None:
             embedding_model_name = 'paraphrase-multilingual-MiniLM-L12-v2'
             embedding_model = SentenceTransformer(embedding_model_name)
         
-        # BERTopic mit Stopword-Filterung konfigurieren
-        vectorizer = CountVectorizer(stop_words=list(GERMAN_STOPWORDS), max_features=1000, 
-                                     lowercase=True, ngram_range=(1, 2))
-        topic_model = BERTopic(embedding_model=embedding_model, language="german", verbose=True, 
-                               nr_topics=12, min_topic_size=50, vectorizer_model=vectorizer)
+        # Konfiguriere BERTopic mit Stopword-Filterung & Hyperparametern
+        vectorizer = CountVectorizer(stop_words=list(GERMAN_STOPWORDS),  # Filtere Füllwörter
+                                     max_features=1000,  # Begrenze Features auf Top 1000
+                                     lowercase=True, 
+                                     ngram_range=(1, 2))  # Einzelne Wörter + Bigrams
+        
+        topic_model = BERTopic(embedding_model=embedding_model, 
+                              language="german", 
+                              verbose=False,
+                              nr_topics=12,
+                              min_topic_size=50,
+                              vectorizer_model=vectorizer)
 
-        # Training (Fit)
+        # Training
+        print(f"    Trainiere BERTopic mit vorgenerierten Embeddings...")
         topics, probs = topic_model.fit_transform(df['review_body'].tolist(), embeddings)
-        print(f"✓ BERTopic Modell trainiert")
+        n_topics_found = len(set(topics)) - (1 if -1 in set(topics) else 0)  # Zähle gefundene Topics (ohne Noise)
+        print(f"    ✓ BERTopic Modell trainiert: {n_topics_found} Topics gefunden")
         
         # Zwischenspeichern in Datei
         save_step(4, {
             'df': df,
             'lda_model': lda_model,
+            'lsa_model': lsa_model,
+            'tfidf_vectorizer': tfidf_vectorizer,
             'dictionary': dictionary,
             'corpus': corpus,
             'topic_model': topic_model,
@@ -420,23 +470,50 @@ if __name__ == '__main__':
         print("SCHRITT 5: ERGEBNISSE ANZEIGEN")
         print("=" * 60)
 
-        # LDA
-        print("\nGefundene Themen mit LDA:")
-        print("-" * 60)
+        # === LDA Topic-Ergebnisse ===
+        print("\n" + "=" * 60)
+        print("ERGEBNISSE: LDA TOPICS (Top 10 Wörter pro Topic)")
+        print("=" * 60)
+        print("(Format: Gewicht * Wort + Gewicht * Wort...)\n")
         lda_topics = []
         for idx, topic in lda_model.print_topics(-1):
-            print(f"Topic: {idx} \nWords: {topic}\n")
+            print(f"Topic {idx}:")
+            print(f"  {topic}\n")
             lda_topics.append((idx, topic))
 
-        # BERTopic
-        print("\nGefundene Themen mit BERTopic:")
-        print("-" * 60)
+        # === LSA Topic-Ergebnisse ===
+        print("\n" + "=" * 60)
+        print("ERGEBNISSE: LSA TOPICS (Top 10 Wörter pro Topic)")
+        print("=" * 60)
+        print("(Format: Gewicht * Wort + Gewicht * Wort...)\n")
+        lsa_topics = []
+        if lsa_model is not None and tfidf_vectorizer is not None:
+            feature_names = tfidf_vectorizer.get_feature_names_out()
+            lsa_topics = get_lsa_topics(lsa_model, feature_names, top_n=10)
+            for idx, topic in lsa_topics:
+                print(f"Topic {idx}:")
+                print(f"  {topic}\n")
+            lsa_explained_variance = float(np.sum(lsa_model.explained_variance_ratio_))
+            print(f"Erklärte Varianz (kumuliert): {lsa_explained_variance:.2%}")
+        else:
+            lsa_explained_variance = None
+            print("LSA Ergebnisse nicht verfügbar (fehlendes Modell oder fehlender TF-IDF-Vektorisierer).")
+
+        # === BERTopic Topic-Ergebnisse ===
+        print("\n" + "=" * 60)
+        print("ERGEBNISSE: BERTOPIC TOPICS (Semantisch gruppiert)")
+        print("=" * 60)
+        print("\nTop 10 Topics nach Dokumentanzahl:\n")
         freq = topic_model.get_topic_info()
-        print(freq.head())
+        # Zeige erweiterte Statistiken
+        print(freq[['Topic', 'Count', 'Name']].head(10).to_string(index=False))
+        print(f"\n... ({len(freq)-1} Topics insgesamt, Topic -1 = Noise/Outlier)")
         
         # Speichern in Datei
         save_step(5, {
             'lda_topics': lda_topics,
+            'lsa_topics': lsa_topics,
+            'lsa_explained_variance': lsa_explained_variance,
             'bertopic_info': freq
         }, output_dir, add_timestamp)
     
