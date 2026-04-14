@@ -14,6 +14,7 @@ from sklearn.decomposition import TruncatedSVD
 from sentence_transformers import SentenceTransformer
 import gensim
 from gensim import corpora
+from gensim.models import CoherenceModel
 from bertopic import BERTopic
 from pandarallel import pandarallel
 
@@ -78,7 +79,10 @@ def save_step(step_num, data, output_dir, add_timestamp=False):
             'lda_model': data['lda_model'],
             'lsa_model': data['lsa_model'],
             'tfidf_vectorizer': data['tfidf_vectorizer'],
-            'topic_model': data['topic_model']
+            'topic_model': data['topic_model'],
+            'lda_coherence': data.get('lda_coherence'),
+            'lsa_coherence': data.get('lsa_coherence'),
+            'bertopic_coherence': data.get('bertopic_coherence')
         }, filepath, compress=3)
         print(f"✓ Schritt 4 gespeichert: {filepath}")
     
@@ -92,18 +96,30 @@ def save_step(step_num, data, output_dir, add_timestamp=False):
             
             f.write("LDA Themen:\n")
             f.write("-" * 60 + "\n")
+            if data.get('lda_coherence') is not None:
+                f.write(f"Coherence: {data['lda_coherence']:.4f}\n\n")
+            else:
+                f.write("Coherence: nicht verfügbar\n\n")
             for idx, topic in data['lda_topics']:
                 f.write(f"Topic {idx}:\n{topic}\n\n")
 
             f.write("\n" + "=" * 60 + "\n")
             f.write("LSA Themen:\n")
             f.write("-" * 60 + "\n")
+            if data.get('lsa_coherence') is not None:
+                f.write(f"Coherence: {data['lsa_coherence']:.4f}\n\n")
+            else:
+                f.write("Coherence: nicht verfügbar\n\n")
             for idx, topic in data['lsa_topics']:
                 f.write(f"Topic {idx}:\n{topic}\n\n")
 
             f.write("\n" + "=" * 60 + "\n")
             f.write("BERTopic Themen:\n")
             f.write("-" * 60 + "\n")
+            if data.get('bertopic_coherence') is not None:
+                f.write(f"Coherence: {data['bertopic_coherence']:.4f}\n\n")
+            else:
+                f.write("Coherence: nicht verfügbar\n\n")
             f.write(data['bertopic_info'].to_string())
         
         print(f"✓ Schritt 5 gespeichert: {filepath}")
@@ -188,6 +204,38 @@ def get_lsa_topics(lsa_model, feature_names, top_n=10):
     return lsa_topics
 
 
+def get_lsa_topic_words(lsa_model, feature_names, top_n=10):
+    topic_words = []
+    for component in lsa_model.components_:
+        top_term_indices = component.argsort()[-top_n:][::-1]
+        topic_words.append([feature_names[i] for i in top_term_indices])
+    return topic_words
+
+
+def calculate_coherence_score(topics_words, texts, dictionary, coherence='c_v'):
+    if not topics_words:
+        return None
+    coherence_model = CoherenceModel(
+        topics=topics_words,
+        texts=texts,
+        dictionary=dictionary,
+        coherence=coherence
+    )
+    return float(coherence_model.get_coherence())
+
+
+def get_bertopic_topic_words(topic_model, top_n=10):
+    topics_dict = topic_model.get_topics()
+    topic_words = []
+    for topic_id, word_tuples in topics_dict.items():
+        if topic_id == -1:
+            continue  # -1 ist Outlier/Noise-Cluster
+        words = [word for word, _ in word_tuples[:top_n]]
+        if words:
+            topic_words.append(words)
+    return topic_words
+
+
 if __name__ == '__main__':
     # ==========================================
     # Variablen initialisieren
@@ -205,6 +253,9 @@ if __name__ == '__main__':
     topic_model = None
     topics = None
     probs = None
+    lda_coherence = None
+    lsa_coherence = None
+    bertopic_coherence = None
 
     # ==========================================
     # PARAMETER VERARBEITUNG
@@ -318,6 +369,9 @@ if __name__ == '__main__':
                 topic_model = loaded_data.get('topic_model')
                 topics = loaded_data.get('topics')
                 probs = loaded_data.get('probs')
+                lda_coherence = loaded_data.get('lda_coherence')
+                lsa_coherence = loaded_data.get('lsa_coherence')
+                bertopic_coherence = loaded_data.get('bertopic_coherence')
 
     # ==========================================
     # SCHRITT 2: VORVERARBEITUNG (NLTK & Spellchecker)
@@ -412,6 +466,18 @@ if __name__ == '__main__':
                                                    passes=10)
         print(f"    ✓ LDA Modell trainiert und konvergiert")
 
+        lda_topic_words = [
+            [word for word, _ in topic_terms]
+            for _, topic_terms in lda_model.show_topics(num_topics=-1, num_words=10, formatted=False)
+        ]
+        lda_coherence = calculate_coherence_score(
+            topics_words=lda_topic_words,
+            texts=df['processed_tokens'].tolist(),
+            dictionary=dictionary,
+            coherence='c_v'
+        )
+        print(f"    Coherence Score: {lda_coherence:.4f}")
+
         # === METHODE B: LSA (Latent Semantic Analysis) ===
         print("\n  4. LSA Topic-Modellierung...")
         n_topics = 12
@@ -420,6 +486,15 @@ if __name__ == '__main__':
         lsa_model.fit(tfidf_matrix)
         explained_variance = float(np.sum(lsa_model.explained_variance_ratio_))
         print(f"    ✓ LSA Modell trainiert: {n_topics} Komponenten, erklärte Varianz={explained_variance:.2%}")
+
+        lsa_topic_words = get_lsa_topic_words(lsa_model, tfidf_vectorizer.get_feature_names_out(), top_n=10)
+        lsa_coherence = calculate_coherence_score(
+            topics_words=lsa_topic_words,
+            texts=df['processed_tokens'].tolist(),
+            dictionary=dictionary,
+            coherence='c_v'
+        )
+        print(f"    Coherence Score: {lsa_coherence:.4f}")
 
         # === METHODE C: BERTopic (Modern Deep Learning) ===
         print("\n  5. BERTopic Topic-Modellierung (moderner kontextbasierter Ansatz)...")
@@ -447,6 +522,23 @@ if __name__ == '__main__':
         topics, probs = topic_model.fit_transform(df['review_body'].tolist(), embeddings)
         n_topics_found = len(set(topics)) - (1 if -1 in set(topics) else 0)  # Zähle gefundene Topics (ohne Noise)
         print(f"    ✓ BERTopic Modell trainiert: {n_topics_found} Topics gefunden")
+
+        bertopic_coherence = None
+        try:
+            bertopic_topic_words = get_bertopic_topic_words(topic_model, top_n=10)
+            analyzer = vectorizer.build_analyzer()
+            bertopic_texts = [analyzer(doc) for doc in df['review_body'].tolist()]
+            bertopic_dictionary = corpora.Dictionary(bertopic_texts)
+            # Für BERTopic nutzen wir denselben Tokenizer wie im BERTopic-CountVectorizer.
+            bertopic_coherence = calculate_coherence_score(
+                topics_words=bertopic_topic_words,
+                texts=bertopic_texts,
+                dictionary=bertopic_dictionary,
+                coherence='c_v'
+            )
+            print(f"    Coherence Score: {bertopic_coherence:.4f}")
+        except Exception as e:
+            print(f"    Coherence Score für BERTopic nicht berechenbar: {e}")
         
         # Zwischenspeichern in Datei
         save_step(4, {
@@ -458,7 +550,10 @@ if __name__ == '__main__':
             'corpus': corpus,
             'topic_model': topic_model,
             'topics': topics,
-            'probs': probs
+            'probs': probs,
+            'lda_coherence': lda_coherence,
+            'lsa_coherence': lsa_coherence,
+            'bertopic_coherence': bertopic_coherence
         }, output_dir, add_timestamp)
 
     # ==========================================
@@ -475,6 +570,11 @@ if __name__ == '__main__':
         print("ERGEBNISSE: LDA TOPICS (Top 10 Wörter pro Topic)")
         print("=" * 60)
         print("(Format: Gewicht * Wort + Gewicht * Wort...)\n")
+        if lda_coherence is not None:
+            print(f"Coherence Score: {lda_coherence:.4f}\n")
+        else:
+            print("Coherence Score: nicht verfügbar\n")
+
         lda_topics = []
         for idx, topic in lda_model.print_topics(-1):
             print(f"Topic {idx}:")
@@ -488,6 +588,11 @@ if __name__ == '__main__':
         print("(Format: Gewicht * Wort + Gewicht * Wort...)\n")
         lsa_topics = []
         if lsa_model is not None and tfidf_vectorizer is not None:
+            if lsa_coherence is not None:
+                print(f"Coherence Score: {lsa_coherence:.4f}\n")
+            else:
+                print("Coherence Score: nicht verfügbar\n")
+
             feature_names = tfidf_vectorizer.get_feature_names_out()
             lsa_topics = get_lsa_topics(lsa_model, feature_names, top_n=10)
             for idx, topic in lsa_topics:
@@ -504,6 +609,12 @@ if __name__ == '__main__':
         print("ERGEBNISSE: BERTOPIC TOPICS (Semantisch gruppiert)")
         print("=" * 60)
         print("\nTop 10 Topics nach Dokumentanzahl:\n")
+
+        if bertopic_coherence is not None:
+            print(f"Coherence Score: {bertopic_coherence:.4f}\n")
+        else:
+            print("Coherence Score: nicht verfügbar\n")
+
         freq = topic_model.get_topic_info()
         # Zeige erweiterte Statistiken
         print(freq[['Topic', 'Count', 'Name']].head(10).to_string(index=False))
@@ -514,7 +625,10 @@ if __name__ == '__main__':
             'lda_topics': lda_topics,
             'lsa_topics': lsa_topics,
             'lsa_explained_variance': lsa_explained_variance,
-            'bertopic_info': freq
+            'bertopic_info': freq,
+            'lda_coherence': lda_coherence,
+            'lsa_coherence': lsa_coherence,
+            'bertopic_coherence': bertopic_coherence
         }, output_dir, add_timestamp)
     
     print("\n" + "=" * 60)
